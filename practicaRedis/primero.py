@@ -14,6 +14,7 @@ conexionRedis = redis.ConnectionPool(
 )
 baseDatosRedis = redis.Redis(connection_pool=conexionRedis)
 
+
 print("\n====================")
 print("#1 - Crear registros clave-valor")
 print("====================")
@@ -28,7 +29,7 @@ baseDatosRedis.set('actividad:est003', 'Acceso al módulo de Matemáticas', ex=9
 baseDatosRedis.set('actividad:est003:tiempo', 78)
 
 baseDatosRedis.set('actividad:est004', 'Acceso al módulo de Matemáticas', ex=900)
-baseDatosRedis.set('actividad:est004:tiempo', 12)
+baseDatosRedis.set('actividad:est004:tiempo', 32)
 
 baseDatosRedis.set('actividad:est005', 'Acceso al módulo de Química', ex=900)
 baseDatosRedis.set('actividad:est005:tiempo', 125)
@@ -167,14 +168,38 @@ for clave in claves_tiempo:
 
 
 print("\n====================")
-print("#13 - Eliminar registros filtrados")
+print("#13 - Eliminar registros filtrados (solo los de prueba con prefijo est09*)")
 print("====================")
-claves_tiempo = baseDatosRedis.keys('actividad:*:tiempo')
-for clave in claves_tiempo:
+
+# 1. Crear registros de prueba
+baseDatosRedis.set('actividad:est099:tiempo', 135)
+baseDatosRedis.set('actividad:est098:tiempo', 135)
+baseDatosRedis.set('actividad:est097:tiempo', 135)
+
+print("Registros creados de prueba para eliminación:")
+for clave in [
+    "actividad:est099:tiempo",
+    "actividad:est098:tiempo",
+    "actividad:est097:tiempo"
+]:
+    print(f"  {clave} -> {baseDatosRedis.get(clave)}")
+
+# 2. Filtrar SOLO los registros cuyo prefijo sea actividad:est09*
+claves_prueba = baseDatosRedis.keys("actividad:est09*")
+
+print("\nClaves encontradas para eliminar:")
+for clave in claves_prueba:
+    print(f"  {clave}")
+
+# 3. Eliminar los registros filtrados
+print("\nEliminando registros filtrados...")
+for clave in claves_prueba:
     valor = baseDatosRedis.get(clave)
     baseDatosRedis.delete(clave)
-    print(f"Clave eliminada: {clave} --> Valor eliminado: {valor}")
-"""
+    print(f"Clave eliminada: {clave} --> Valor: {valor}")
+
+print("\nProceso finalizado. Se eliminaron únicamente los registros actividad:est09*.")
+
 print("\n====================")
 print("#14 - Crear estructura JSON a partir de datos existentes en Redis")
 print("====================")
@@ -182,45 +207,69 @@ print("====================")
 # Crear array vacío para cada categoría
 baseDatosRedis.json().set("json_data", "$", {"actividad": [], "tutoria": [], "profesor": []})
 
-# Actividades de estudiantes
-claves_actividad = baseDatosRedis.keys('actividad:est00[1-6]')
+# ================================
+# ACTIVIDADES DE ESTUDIANTES
+# ================================
+# Filtramos SOLO claves de actividad SIN incluir :tiempo
+claves_actividad = sorted([
+    c for c in baseDatosRedis.keys('actividad:est0??')
+    if not c.endswith(':tiempo')
+])
+
 for clave in claves_actividad:
     actividad = baseDatosRedis.get(clave)
-    tiempo = baseDatosRedis.get(clave + ":tiempo")
+    tiempo = baseDatosRedis.get(f"{clave}:tiempo")  # tiempo asociado
+
     estudiante_dict = {
-        "id": clave.split(":")[1],
-        "actividad": actividad,
+        "id": clave.split(":")[1],       # est001
+        "actividad": actividad,          # Acceso a plataforma
         "tiempo": int(tiempo) if tiempo else None
     }
+
     baseDatosRedis.json().arrappend("json_data", "$.actividad", estudiante_dict)
 
-# Tutorías
-claves_tutoria = baseDatosRedis.keys('tutoria:sesion*')
+
+# ================================
+# TUTORÍAS
+# ================================
+claves_tutoria = sorted(baseDatosRedis.keys('tutoria:sesion*'))
+
 for clave in claves_tutoria:
     if clave.endswith(":tutor"):
-        continue
+        continue  # evitar duplicado
+
     estado = baseDatosRedis.get(clave)
-    tutor = baseDatosRedis.get(clave + ":tutor")
+    tutor = baseDatosRedis.get(f"{clave}:tutor")
+
     tutoria_dict = {
-        "sesion": clave.split(":")[1],
+        "sesion": clave.split(":")[1],   # sesion101
         "estado": estado,
         "tutor": tutor
     }
+
     baseDatosRedis.json().arrappend("json_data", "$.tutoria", tutoria_dict)
 
-# Profesores
-claves_profesor = baseDatosRedis.keys('profesor:ultimaconexion:*')
+
+# ================================
+# PROFESORES
+# ================================
+claves_profesor = sorted(baseDatosRedis.keys('profesor:ultimaconexion:*'))
+
 for clave in claves_profesor:
     profesor_dict = {
-        "id": clave.split(":")[2],
+        "id": clave.split(":")[2],       # prof001
         "ultima_conexion": baseDatosRedis.get(clave)
     }
+
     baseDatosRedis.json().arrappend("json_data", "$.profesor", profesor_dict)
 
-# Mostrar JSON final
+
+# ================================
+# MOSTRAR JSON FINAL
+# ================================
 json_final = baseDatosRedis.json().get("json_data")
 print("\nJSON final generado a partir de Redis:")
-print(json.dumps(json_final, indent=4))
+print(json.dumps(json_final, indent=4, ensure_ascii=False))
 
 
 print("\n====================")
@@ -233,77 +282,87 @@ json_data = baseDatosRedis.json().get("json_data")
 # Filtrar ejemplos
 actividades_mayor_50 = [a for a in json_data["actividad"] if a["tiempo"] and a["tiempo"] > 50]
 print("\nActividades con tiempo > 50 minutos:")
-print(json.dumps(actividades_mayor_50, indent=4))
+print(json.dumps(actividades_mayor_50, indent=4, ensure_ascii=False))
 
 tutorias_finalizadas = [t for t in json_data["tutoria"] if t["estado"] == "Finalizada"]
 print("\nTutorías con estado 'Finalizada':")
-print(json.dumps(tutorias_finalizadas, indent=4))
+print(json.dumps(tutorias_finalizadas, indent=4, ensure_ascii=False))
 
 profesores_recientes = [p for p in json_data["profesor"] if p["ultima_conexion"] > "2025-11-19"]
 print("\nProfesores con última conexión posterior al 2025-11-19:")
-print(json.dumps(profesores_recientes, indent=4))
-"""
+print(json.dumps(profesores_recientes, indent=4, ensure_ascii=False))
+
 
 print("\n====================")
 print("#16 - Crear listas completas en Redis")
 print("====================")
 
 # ====================
-# Lista de estudiantes completa
+# Lista de estudiantes
 # ====================
-baseDatosRedis.delete("estudiantes:lista")  # limpiar si existía
+baseDatosRedis.delete("estudiantes:lista")  # Limpiar lista previa
 
-claves_actividad = baseDatosRedis.keys("actividad:est00*")
+# Filtrar solo claves de actividad de estudiantes, excluyendo tiempos
+claves_actividad = sorted([c for c in baseDatosRedis.keys("actividad:est0*") if not c.endswith(":tiempo")])
+
 for clave in claves_actividad:
+    tiempo_val = baseDatosRedis.get(clave + ":tiempo")
     estudiante_dict = {
-        "id": clave.split(":")[1],
+        "id": clave.split(":")[1],  # ej. est001
         "actividad": baseDatosRedis.get(clave),
-        "tiempo": int(baseDatosRedis.get(clave + ":tiempo")) if baseDatosRedis.get(clave + ":tiempo") else None
+        "tiempo": int(tiempo_val) if tiempo_val else None
     }
     baseDatosRedis.rpush("estudiantes:lista", json.dumps(estudiante_dict))
 
-# Mostrar lista completa
+# Mostrar lista completa de estudiantes
 estudiantes = [json.loads(x) for x in baseDatosRedis.lrange("estudiantes:lista", 0, -1)]
 print("\nLista completa de estudiantes:")
 print(json.dumps(estudiantes, indent=4, ensure_ascii=False))
 
-# ====================
-# Lista de tutorías completa
-# ====================
-baseDatosRedis.delete("tutorias:lista")
 
-claves_tutorias = baseDatosRedis.keys("tutoria:sesion*")
+# ====================
+# Lista de tutorías
+# ====================
+baseDatosRedis.delete("tutorias:lista")  # Limpiar lista previa
+
+# Filtrar solo sesiones principales, excluyendo claves ":tutor"
+claves_tutorias = sorted([c for c in baseDatosRedis.keys("tutoria:sesion*") if not c.endswith(":tutor")])
+
 for clave in claves_tutorias:
-    if clave.endswith(":tutor"):
-        continue
+    tutor_val = baseDatosRedis.get(clave + ":tutor") or "Desconocido"
     tutoria_dict = {
-        "sesion": clave.split(":")[1],
+        "sesion": clave.split(":")[1],  # ej. sesion101
         "estado": baseDatosRedis.get(clave),
-        "tutor": baseDatosRedis.get(clave + ":tutor")
+        "tutor": tutor_val
     }
     baseDatosRedis.rpush("tutorias:lista", json.dumps(tutoria_dict))
 
+# Mostrar lista completa de tutorías
 tutorias = [json.loads(x) for x in baseDatosRedis.lrange("tutorias:lista", 0, -1)]
 print("\nLista completa de tutorías:")
 print(json.dumps(tutorias, indent=4, ensure_ascii=False))
 
-# ====================
-# Lista de profesores completa
-# ====================
-baseDatosRedis.delete("profesores:lista")
 
-claves_profesor = baseDatosRedis.keys("profesor:ultimaconexion:*")
+# ====================
+# Lista de profesores
+# ====================
+baseDatosRedis.delete("profesores:lista")  # Limpiar lista previa
+
+claves_profesor = sorted(baseDatosRedis.keys("profesor:ultimaconexion:*"))
+
 for clave in claves_profesor:
     profesor_dict = {
-        "id": clave.split(":")[2],
+        "id": clave.split(":")[2],  # ej. prof001
         "ultima_conexion": baseDatosRedis.get(clave)
     }
     baseDatosRedis.rpush("profesores:lista", json.dumps(profesor_dict))
 
+# Mostrar lista completa de profesores
 profesores = [json.loads(x) for x in baseDatosRedis.lrange("profesores:lista", 0, -1)]
 print("\nLista completa de profesores:")
 print(json.dumps(profesores, indent=4, ensure_ascii=False))
 
+"""
 print("\n====================")
 print("#17 - Obtener elementos de listas con filtro")
 print("====================")
@@ -399,5 +458,6 @@ res = baseDatosRedis.ft("indice:estudiantes").aggregate(req)
 print("Suma de tiempo por actividad:")
 for row in res.rows:
     print(row)
+"""
 # Cerrar conexión
 baseDatosRedis.close()
