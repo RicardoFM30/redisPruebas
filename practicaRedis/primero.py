@@ -1,9 +1,16 @@
 import redis
 import json
 
+from redis.commands.search.query import Query
+import redis.commands.search.aggregation as aggregations
+
 from redis.commands.json.path import Path
 from redis.commands.search.field import TextField, NumericField, TagField
 from redis.commands.search.index_definition import IndexDefinition, IndexType
+from redis.commands.search.aggregation import AggregateRequest
+import redis.commands.search.reducers as reducers
+
+
 
 # Conexión a Redis
 conexionRedis = redis.ConnectionPool(
@@ -312,7 +319,7 @@ for clave in claves_actividad:
         "actividad": baseDatosRedis.get(clave),
         "tiempo": int(tiempo_val) if tiempo_val else None
     }
-    baseDatosRedis.rpush("estudiantes:lista", json.dumps(estudiante_dict))
+    baseDatosRedis.rpush("estudiantes:lista", json.dumps(estudiante_dict, ensure_ascii=False))
 
 # Mostrar lista completa de estudiantes
 estudiantes = [json.loads(x) for x in baseDatosRedis.lrange("estudiantes:lista", 0, -1)]
@@ -335,7 +342,7 @@ for clave in claves_tutorias:
         "estado": baseDatosRedis.get(clave),
         "tutor": tutor_val
     }
-    baseDatosRedis.rpush("tutorias:lista", json.dumps(tutoria_dict))
+    baseDatosRedis.rpush("tutorias:lista", json.dumps(tutoria_dict, ensure_ascii=False))
 
 # Mostrar lista completa de tutorías
 tutorias = [json.loads(x) for x in baseDatosRedis.lrange("tutorias:lista", 0, -1)]
@@ -355,14 +362,14 @@ for clave in claves_profesor:
         "id": clave.split(":")[2],  # ej. prof001
         "ultima_conexion": baseDatosRedis.get(clave)
     }
-    baseDatosRedis.rpush("profesores:lista", json.dumps(profesor_dict))
+    baseDatosRedis.rpush("profesores:lista", json.dumps(profesor_dict, ensure_ascii=False))
 
 # Mostrar lista completa de profesores
 profesores = [json.loads(x) for x in baseDatosRedis.lrange("profesores:lista", 0, -1)]
 print("\nLista completa de profesores:")
 print(json.dumps(profesores, indent=4, ensure_ascii=False))
 
-"""
+
 print("\n====================")
 print("#17 - Obtener elementos de listas con filtro")
 print("====================")
@@ -398,8 +405,9 @@ profesores_recientes = [
 print("\nProfesores con última conexión posterior al 2025-11-19:")
 print(json.dumps(profesores_recientes, indent=4, ensure_ascii=False))
 
+
 print("\n====================")
-print("#18 - Crear índice para los estudiantes usando JSON")
+print("#18 - Crear índice para los estudiantes usando JSON (eliminar y recrear)")
 print("====================")
 
 # Definir esquema para estudiantes
@@ -409,29 +417,41 @@ squema_estudiantes = (
     NumericField("$.tiempo", as_name="tiempo")
 )
 
-# Crear índice
-try:
-    baseDatosRedis.ft("indice:estudiantes").create_index(
-        squema_estudiantes,
-        definition=IndexDefinition(
-            prefix=["estudiante:"],
-            index_type=IndexType.JSON
-        )
-    )
-except Exception as e:
-    print("El índice ya existe o hubo un error:", e)
+indice_nombre = "indice:estudiantes"
 
-# Guardar los estudiantes como JSON
-claves_actividad = baseDatosRedis.keys("actividad:est00*")
+# Eliminar índice si existe
+try:
+    baseDatosRedis.ft(indice_nombre).dropindex(delete_documents=False)
+    print(f"Índice '{indice_nombre}' eliminado.")
+except Exception as e:
+    print(f"No existía índice previo o hubo un error: {e}")
+
+# Crear el índice nuevamente
+baseDatosRedis.ft(indice_nombre).create_index(
+    squema_estudiantes,
+    definition=IndexDefinition(
+        prefix=["estudiante:"],
+        index_type=IndexType.JSON
+    )
+)
+print(f"Índice '{indice_nombre}' creado correctamente.")
+
+# Guardar estudiantes como JSON usando pipeline
+claves_actividad = sorted([c for c in baseDatosRedis.keys("actividad:est0*") if not c.endswith(":tiempo")])
+
+pipeline = baseDatosRedis.pipeline()
 for clave in claves_actividad:
+    tiempo_val = baseDatosRedis.get(clave + ":tiempo")
     estudiante_dict = {
         "id": clave.split(":")[1],
         "actividad": baseDatosRedis.get(clave),
-        "tiempo": int(baseDatosRedis.get(clave + ":tiempo")) if baseDatosRedis.get(clave + ":tiempo") else 0
+        "tiempo": int(tiempo_val) if tiempo_val else 0
     }
-    baseDatosRedis.json().set(f"estudiante:{estudiante_dict['id']}", Path.root_path(), estudiante_dict)
+    pipeline.json().set(f"estudiante:{estudiante_dict['id']}", Path.root_path(), estudiante_dict)
 
-print("Estudiantes guardados como JSON con índice.")
+pipeline.execute()
+print(f"{len(claves_actividad)} estudiantes guardados como JSON con índice '{indice_nombre}'.")
+
 
 print("\n====================")
 print("#19 - Búsqueda con índice por campo 'actividad'")
@@ -443,21 +463,32 @@ resultados = baseDatosRedis.ft("indice:estudiantes").search(query)
 
 print("Estudiantes con actividad 'Acceso al módulo de Matemáticas':")
 for doc in resultados.docs:
-    print(f"{doc.id} --> id={doc.id}, actividad={doc.actividad}, tiempo={doc.tiempo}")
+    data = json.loads(doc.json)  # <-- parseamos el JSON
+    print(f"{doc.id} --> id={data['id']}, actividad={data['actividad']}, tiempo={data['tiempo']}")
 
 print("\n====================")
-print("#20 - Group By por actividad y sumar tiempos")
+print("#20 - Group By por actividad: sumar tiempos y contar estudiantes")
 print("====================")
 
-from redis.commands.search.aggregation import AggregateRequest, reducers
+# Crear request de agregación
+req = aggregations.AggregateRequest("*").group_by(
+    '@actividad',
+    reducers.sum('@tiempo').alias('total_tiempo'),  # suma de tiempos
+    reducers.count().alias('num_estudiantes')       # cuenta de estudiantes por grupo
+)
 
-# Agrupar por actividad y sumar tiempos
-req = AggregateRequest("*").group_by("@actividad", reducers.Sum("tiempo").alias("total_tiempo"))
+# Ejecutar agregación
 res = baseDatosRedis.ft("indice:estudiantes").aggregate(req)
 
-print("Suma de tiempo por actividad:")
+# Mostrar resultados convertidos a diccionario
+print("Resumen por actividad:")
 for row in res.rows:
-    print(row)
-"""
+    # Cada row viene como lista: ['clave1', valor1, 'clave2', valor2, ...]
+    row_dict = {row[i]: row[i+1] for i in range(0, len(row), 2)}
+    print(f"Actividad: {row_dict['actividad']}")
+    print(f"  Total tiempo: {row_dict['total_tiempo']}")
+    print(f"  Número de estudiantes: {row_dict['num_estudiantes']}\n")
+
+
 # Cerrar conexión
 baseDatosRedis.close()
